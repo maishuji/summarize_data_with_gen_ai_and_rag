@@ -13,6 +13,7 @@ from langchain_community.document_loaders import PyPDFLoader  # New import path
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma  # New import path
 from langchain_ibm import WatsonxLLM
+from dotenv import load_dotenv
 
 # Check for GPU availability and set the appropriate device for computation.
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -23,6 +24,19 @@ chat_history = []
 llm_hub = None
 embeddings = None
 
+# Load environment variables from .env file
+load_dotenv()
+WATSONX_URL = os.getenv("WATSONX_URL")
+PROJECT_ID = os.getenv("PROJECT_ID")
+Watsonx_API = os.getenv("WATSON_API_KEY")
+
+# Set up the credentials for accessing IBM Watson
+credentials = {
+    'url': WATSONX_URL,
+    'apikey' : Watsonx_API
+}
+
+
 # Function to initialize the language model and its embeddings
 def init_llm():
     global llm_hub, embeddings
@@ -31,8 +45,10 @@ def init_llm():
 
     # Llama Model Configuration
     MODEL_ID = "meta-llama/llama-3-3-70b-instruct"
-    WATSONX_URL = "https://us-south.ml.cloud.ibm.com"
-    PROJECT_ID = "skills-network"
+    #WATSONX_URL = "https://us-south.ml.cloud.ibm.com"
+    #PROJECT_ID = "skills-network"
+    # MODEL_ID = os.getenv("MODEL_ID")
+    PROJECT_ID = os.getenv("PROJECT_ID")
 
     # Use the same parameters as before:
     #   MAX_NEW_TOKENS: 256, TEMPERATURE: 0.1
@@ -44,6 +60,7 @@ def init_llm():
 
     # Initialize Llama LLM using the updated WatsonxLLM API
     llm_hub = WatsonxLLM(
+        credentials=credentials,
         model_id=MODEL_ID,
         url=WATSONX_URL,
         project_id=PROJECT_ID,
