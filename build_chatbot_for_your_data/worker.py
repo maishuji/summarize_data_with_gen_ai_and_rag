@@ -7,11 +7,12 @@ os.environ["CHROMA_TELEMETRY"] = "none"
 import torch
 import logging
 import re
+from time import sleep
 from langchain_core.prompts import (
     PromptTemplate,
 )  # Updated import per deprecation notice
 from langchain.chains import RetrievalQA
-from huggingface_hub.errors import BadRequestError
+from huggingface_hub.errors import HfHubHTTPError, BadRequestError
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
@@ -58,7 +59,7 @@ HUGGINGFACEHUB_API_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN")
 
 model_id = "cnicu/t5-small-booksum"
 
-client = InferenceClient(token=HUGGINGFACEHUB_API_TOKEN)
+client = InferenceClient(model=model_id, token=HUGGINGFACEHUB_API_TOKEN, timeout=60)
 
 _CAPS = "A-ZÉÈÀÂÎÔÙÛÇÄËÏÖÜŸ"            # capital letters incl. French accents
 _LOWER = "a-zà-öù-ÿ"                    # lowercase incl. accents
@@ -113,28 +114,66 @@ def _extract_summary(res) -> str:
     return str(res)
 
 def _to_text(x) -> str:
-    # If LangChain passes a ChatPromptValue, turn it into a string
-    if isinstance(x, BaseMessage):
+    # 1) ChatPromptValue-like
+    if hasattr(x, "to_string") and callable(getattr(x, "to_string")):
         return x.to_string()
-    # If LangChain passes a dict, try common keys then fallback to str()
+    if hasattr(x, "to_messages") and callable(getattr(x, "to_messages")):
+        try:
+            msgs = x.to_messages()
+            return "\n".join(getattr(m, "content", "") for m in msgs if hasattr(m, "content"))
+        except Exception:
+            pass
+    # NEW: many LC prompt values expose a `.messages` list directly
+    if hasattr(x, "messages"):
+        try:
+            return "\n".join(getattr(m, "content", "") for m in x.messages if hasattr(m, "content"))
+        except Exception:
+            pass
+
+    # 2) Single LC message
+    if isinstance(x, BaseMessage):
+        return x.content
+
+    # 3) List/tuple of messages
+    if isinstance(x, (list, tuple)) and x and isinstance(x[0], BaseMessage):
+        return "\n".join(getattr(m, "content", str(m)) for m in x)
+
+    # 4) Dict from upstream runnables
     if isinstance(x, dict):
-        for k in ("input", "prompt", "text"):
-            if k in x:
+        for k in ("input", "question", "prompt", "text", "query", "context"):
+            if k in x and x[k] is not None:
                 return str(x[k])
-        return str(x)
-    # If it’s already a string (or something else), stringify
+
+    # 5) Fallback
     return str(x)
 
 
-# To bypass buggy wrapper in langchain-community
-def _summarize(x):
-    text = _to_text(x)
-    try:
-        res = client.summarization(model=model_id, text=text)  # no gen kwargs
-    except BadRequestError:
-        res = client.summarization(model=model_id, text=text)
-    return _extract_summary(res)
 
+def _summarize(text: str) -> str:
+    # Hard guard against huge inputs (T5-small chokes on long text)
+    MAX_CHARS = 4000   # tune as needed
+    text = _to_text(text)
+    if len(text) > MAX_CHARS:
+        text = text[:MAX_CHARS]
+
+    last_err = None
+    for attempt in range(3):
+        try:
+            res = client.summarization(
+                model="cnicu/t5-small-booksum",
+                text=text,
+            )
+            # Extract string (as we already did before)
+            return _extract_summary(res)
+        except BadRequestError as e:
+            # 400-level: usually parameter/size issues; break immediately
+            raise
+        except HfHubHTTPError as e:
+            last_err = e
+            # 5xx: transient — backoff and retry
+            sleep(1.5 * (2 ** attempt))
+    # After retries, bubble up the last error
+    raise last_err
 
 # Function to initialize the language model and its embeddings
 def init_llm():
@@ -188,8 +227,8 @@ def process_document(document_path):
     # Load the document
     loader = PyPDFLoader(document_path)
     documents = loader.load()
-    #for d in documents:
-    #    d.page_content = clean_pdf_text(d.page_content)
+    for d in documents:
+        d.page_content = clean_pdf_text(d.page_content)
     logger.debug("Loaded %d document(s)", len(documents))
 
     # Split the document into chunks, set chunk_size=1024, and chunk_overlap=64. assign it to variable text_splitter
