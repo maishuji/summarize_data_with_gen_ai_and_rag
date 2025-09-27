@@ -8,6 +8,7 @@ import torch
 import logging
 import re
 from time import sleep
+from requests.exceptions import ReadTimeout as ReadTimeoutError
 from langchain_core.prompts import (
     PromptTemplate,
 )  # Updated import per deprecation notice
@@ -57,9 +58,10 @@ WATSONX_API_KEY = os.getenv("WATSON_API_KEY")
 HUGGINGFACEHUB_API_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN")
 
 
-model_id = "cnicu/t5-small-booksum"
+# model_id = "cnicu/t5-small-booksum"
+model_id = "facebook/bart-large-cnn"
 
-client = InferenceClient(model=model_id, token=HUGGINGFACEHUB_API_TOKEN, timeout=60)
+client = InferenceClient(model=model_id, token=HUGGINGFACEHUB_API_TOKEN, timeout=120)
 
 _CAPS = "A-ZÉÈÀÂÎÔÙÛÇÄËÏÖÜŸ"            # capital letters incl. French accents
 _LOWER = "a-zà-öù-ÿ"                    # lowercase incl. accents
@@ -156,11 +158,13 @@ def _summarize(text: str) -> str:
     if len(text) > MAX_CHARS:
         text = text[:MAX_CHARS]
 
+    
+
     last_err = None
     for attempt in range(3):
         try:
             res = client.summarization(
-                model="cnicu/t5-small-booksum",
+                model=model_id,
                 text=text,
             )
             # Extract string (as we already did before)
@@ -172,6 +176,10 @@ def _summarize(text: str) -> str:
             last_err = e
             # 5xx: transient — backoff and retry
             sleep(1.5 * (2 ** attempt))
+        except ReadTimeoutError as e:
+            logger.warning("ReadTimeoutError from HF Inference, retrying...")
+            last_err = e
+            sleep(1.5 * (2 ** attempt)) 
     # After retries, bubble up the last error
     raise last_err
 
